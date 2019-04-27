@@ -1,0 +1,196 @@
+#!/usr/bin/env ruby
+
+### USAGE
+#
+# to install all version this script knows:
+#   ./sqlite-build
+# to install a specific version this script knows:
+#   ./sqlite-build <version>
+# to env vars for a specific version:
+#   ./sqlite-build env <version>
+#
+#
+### CUSTOMIZATION
+#
+# SQLITE_BUILD_WORKDIR, default: $TMPDIR/sqlite-build
+#   working directory to put artifacts
+#
+# SQLITE_BUILD_RCFILE, default: .sqlite-buildrc (relative to __dir__)
+#   YAML file with versions to install
+#   this YAML file must have the following format:
+#
+#   3.27.2:
+#     commit: bd49a827
+#     sha256: b22e2725c1a5990e2b4199b8383b546239bce867e35d2ddb98a842ee058fefb7
+#
+#
+# get sqlite versions from
+#   https://sqlite.org/src/taglist
+#
+# validate the download and calculate the sha256 yourself first, then add them.
+
+require "tempfile"
+require "yaml"
+require "open3"
+
+ENV["SQLITE_BUILD_RCFILE"] ||= File.expand_path("../.sqlite-buildrc", __FILE__)
+VERSIONS = YAML.load_file ENV["SQLITE_BUILD_RCFILE"]
+
+WORKDIR = if ENV["SQLITE_BUILD_WORKDIR"]
+            File.expand_path ENV["SQLITE_BUILD_WORKDIR"]
+          else
+            File.join Dir.tmpdir, "sqlite-build"
+          end
+
+system %[mkdir -p "#{WORKDIR}"]
+
+def archive version
+  "tar/#{version}/#{VERSIONS[version]["commit"]}.tar.gz"
+end
+
+def download version
+  commit = VERSIONS.fetch(version)["commit"]
+  url = "https://sqlite.org/src/tarball/#{commit}/#{version}.tar.gz"
+  out = archive version
+
+  log "Downloading #{version}"
+  system %[mkdir -p "#{WORKDIR}/tar/#{version}"]
+  execute "curl -sSLo #{out} #{url}" unless File.exist? out
+
+  validate_checksum! version
+end
+
+def validate_checksum! version
+  Dir.chdir WORKDIR do
+    file_name = archive version
+    shasum_str = "#{VERSIONS[version]["sha256"]}  #{file_name}"
+    execute %Q[echo "#{shasum_str}" | shasum -a 256 -c]
+  end
+end
+
+def extract version
+  log "Extracting #{version}"
+  src_path = File.expand_path "src/#{version}", WORKDIR
+  unless File.exist? src_path
+    system %[mkdir -p "#{src_path}"]
+    execute "tar -xzf #{archive version} -C src/#{version}/ --strip-components=1"
+  end
+end
+
+def build version
+  log "Building #{version}"
+  configure version
+  install version
+end
+
+def configure version
+  prefix = File.expand_path "build/#{version}", WORKDIR
+  return if File.exist? prefix
+  execute "./configure --prefix=#{prefix} --disable-tcl", chdir: "src/#{version}"
+end
+
+def install version
+  return if installed? version
+  execute "make install", chdir: "src/#{version}"
+end
+
+def gem_install version
+  gem_path = File.expand_path "gem/#{version}", WORKDIR
+  return if File.directory? gem_path
+
+  log "Installing Gem #{version}"
+  sqlite_path = File.expand_path "build/#{version}", WORKDIR
+  build_args = %W[
+    --with-sqlite3-include="#{sqlite_path}/include"
+    --with-sqlite3-lib="#{sqlite_path}/lib"
+  ]
+
+  Gem.sources << "https://rubygems.org"
+  Gem.install "sqlite3", Gem::Requirement.default,
+    install_dir: gem_path,
+    build_args: build_args
+end
+
+def purge
+  dirs = %w( build gem src tar ).map { |d| %["#{d}/#{ARGV[1]}"] }
+  execute "rm -rf #{dirs.join " "}"
+end
+
+def installed? version
+  Dir.chdir WORKDIR do
+    %W[ build/#{version}/bin/sqlite3 gem/#{version} ].all? { |f| File.exist? f }
+  end
+end
+
+def verify version
+  Dir.chdir WORKDIR do
+    version_string = %x[build/#{version}/bin/sqlite3 -version].strip
+    succ "Installed #{version} (sqlite3 -version: #{version_string})"
+  end
+end
+
+def info version
+  puts <<-INFO
+To use the sqlite3 gem with bindings for sqlite #{version}
+set the following environment variable for your rubygems to pick it up:
+
+  GEM_HOME="#{File.expand_path("gem/#{version}", WORKDIR)}"
+INFO
+end
+
+def env(*)
+  puts %(GEM_HOME="#{File.join(WORKDIR, "gem", ARGV[1])}")
+end
+
+def log msg
+  puts "\n\e[1m=> #{msg}\e[0m\n"
+end
+
+def err msg
+  puts "\n\e[91m=> #{msg}\e[0m\n"
+end
+
+def succ msg
+  puts "\n\e[92m=> #{msg}\e[0m\n"
+end
+
+def execute cmd, options = {}
+  work_dir = File.join WORKDIR, options[:chdir].to_s
+  Open3.popen3(cmd, chdir: work_dir) do |_, stdout, stderr, thread|
+    while l = stdout.gets do; puts l; end if $DEBUG
+
+    status = thread.value
+    if status.exitstatus > 0
+      err "Command exited with non-zero status code (#{status.exitstatus})"
+      log " COMMAND"
+      puts cmd
+      log " STDOUT"
+      puts stdout.read
+      log " STDERR"
+      puts stderr.read
+    end
+    status.exitstatus
+  end == 0 || exit(1)
+  # require "pry"; binding.pry
+end
+
+if respond_to? ARGV[0], true
+  __send__ ARGV[0]
+else
+  Array(ARGV[0] || VERSIONS.keys).each do |v|
+    system %[mkdir -p "#{WORKDIR}"/{tar,src}]
+    puts "Working directory: #{WORKDIR}"
+    if installed? v
+      puts "Already installed."
+      puts
+      info v
+    else
+      download v
+      extract v
+      build v
+      gem_install v
+      verify v
+      info v
+    end
+  end
+end
