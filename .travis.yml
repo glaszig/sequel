@@ -22,8 +22,22 @@ matrix:
     - rvm: jruby-19mode
     - rvm: jruby-9.0.5.0
     - rvm: truffleruby
+env:
+  global:
+    - SQLITE_BUILD_WORKDIR=sqlite_build
+  matrix:
+    - SQLITE_VERSION=3.6.10
+    - SQLITE_VERSION=3.19.4
+    - SQLITE_VERSION=3.27.2
+cache:
+  directories:
+    - sqlite_build
 before_install:
   - gem install bundler || gem install bundler --version '< 2'
+  - ./sqlite-build $SQLITE_VERSION
+  - echo $(./sqlite-build env $SQLITE_VERSION)
+  - export $(./sqlite-build env $SQLITE_VERSION)
+  - gem env
 script: bundle exec rake spec_travis
 gemfile: .travis.gemfile
 before_script:

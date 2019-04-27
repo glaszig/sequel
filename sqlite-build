@@ -139,7 +139,7 @@ INFO
 end
 
 def env(*)
-  puts %(GEM_HOME="#{File.join(WORKDIR, "gem", ARGV[1])}")
+  puts %(GEM_HOME=#{File.join(WORKDIR, "gem", ARGV[1])})
 end
 
 def log msg
